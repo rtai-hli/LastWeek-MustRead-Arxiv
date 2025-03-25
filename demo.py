@@ -181,7 +181,7 @@ def run_full_demo():
         "title": sample_paper["title"],
         "authors": sample_paper["authors"],
         "published_date": sample_paper["published"],
-        "processed_date": "2023-01-16",  # 示例日期
+        "processed_date": "2025-03-26",  # 示例日期
         "summary": summary,
         "classification": classification,
         "novelty_assessment": assessment,
