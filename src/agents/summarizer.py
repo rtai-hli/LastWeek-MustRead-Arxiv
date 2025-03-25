@@ -1,95 +1,108 @@
 # agents/summarizer.py
+"""Agent for extracting key contributions and innovations from research papers."""
+
 import logging
-import autogen
-from typing import Dict, Any, List
+from typing import Dict, Any, Optional
 import openai
+from openai import OpenAI
+from src.utils.sample_data import get_sample_papers
 
 logger = logging.getLogger(__name__)
 
 class SummarizerAgent:
-    """负责提取论文主要贡献和创新点的摘要Agent"""
+    """Agent responsible for extracting main contributions and innovations from research papers.
     
-    def __init__(self, config: Dict[str, Any]):
-        self.config = config
-        self.llm_config = config["llm_config"]
-        
-        # 创建AutoGen智能体配置
-        self.agent_config = {
-            "name": "SummarizerAgent",
-            "llm_config": self.llm_config,
-            "system_message": """
-            你是一位专业的AI论文摘要专家，擅长从论文中提取关键的研究贡献和创新点。
-            你的任务是阅读论文内容，并提取出论文的主要贡献、创新方法和关键发现。
-            你需要关注论文中的"我们提出了..."、"贡献包括..."、"本文的创新点..."等关键描述。
-            请保持摘要简洁、准确、全面，突出论文的核心创新和学术价值。
-            """
-        }
-        
-        # 创建AutoGen智能体实例
-        self.agent = autogen.AssistantAgent(**self.agent_config)
-        self.user_proxy = autogen.UserProxyAgent(
-            name="SummarizerProxy",
-            human_input_mode="NEVER",
-            system_message="你代表摘要智能体与其他智能体通信。"
-        )
-        
-        # 初始化OpenAI客户端（直接API调用备选方案）
-        self.client = openai.OpenAI(api_key=config["openai_api_key"])
+    This agent uses OpenAI's API to generate comprehensive summaries of research papers,
+    focusing on their key contributions, methodologies, and potential impact.
+    """
     
-    def summarize_paper(self, paper: Dict[str, Any]) -> str:
-        """生成论文的主要贡献摘要
+    def __init__(self, config: Dict[str, Any], use_sample_data: bool = False):
+        """Initialize the SummarizerAgent.
         
         Args:
-            paper: 包含论文信息的字典，包括标题、作者、摘要和正文
+            config: Configuration dictionary containing OpenAI API settings
+            use_sample_data: If True, use sample data instead of making API calls
+        """
+        self.config = config
+        self.use_sample_data = use_sample_data
+        
+        # Initialize OpenAI client
+        if not use_sample_data:
+            self.client = OpenAI(api_key=config.get("openai_api_key"))
+            self.model = config.get("model", "gpt-4-turbo-preview")
+            self.temperature = config.get("temperature", 0.7)
+        
+        self.system_message = """
+        You are an expert AI paper summarization specialist, skilled at extracting key research 
+        contributions and innovations from papers. Your task is to read the paper content and 
+        extract the main contributions, innovative methods, and key findings.
+        
+        Focus on phrases like "we propose...", "contributions include...", "our innovations are..."
+        Keep the summary concise, accurate, and comprehensive, highlighting the core innovations 
+        and academic value.
+        """
+    
+    def summarize_paper(self, paper: Dict[str, Any]) -> Dict[str, str]:
+        """Generate a summary of the paper's main contributions.
+        
+        Args:
+            paper: Dictionary containing paper information including title, authors, 
+                  abstract, and full text
             
         Returns:
-            论文主要贡献的摘要
+            Dictionary containing structured summary sections
         """
-        logger.info(f"正在生成论文摘要: {paper['title']}")
-        
-        # 构建提示词
-        prompt = self._build_summarization_prompt(paper)
+        if self.use_sample_data:
+            logger.info(f"Using sample data for paper: {paper.get('title', 'Unknown')}")
+            sample_papers = get_sample_papers()
+            # Return a pre-written summary for sample data
+            return {
+                "research_problem": "Sample research problem",
+                "methodology": "Sample methodology",
+                "innovations": "Sample innovations",
+                "findings": "Sample findings",
+                "impact": "Sample impact"
+            }
+            
+        logger.info(f"Generating summary for paper: {paper.get('title', 'Unknown')}")
         
         try:
-            # 方法1: 使用AutoGen框架（适合复杂互动）
-            if False:  # 这里设为False，使用方法2，因为这个任务较简单
-                self.user_proxy.initiate_chat(self.agent, message=prompt)
-                # 从chat_history中提取摘要
-                summary = self.user_proxy.chat_history[-1][-1]["content"]
-            # 方法2: 直接调用OpenAI API（更简单，速度更快）
-            else:
-                response = self.client.chat.completions.create(
-                    model=self.llm_config["model"],
-                    temperature=self.llm_config["temperature"],
-                    messages=[
-                        {"role": "system", "content": self.agent_config["system_message"]},
-                        {"role": "user", "content": prompt}
-                    ]
-                )
-                summary = response.choices[0].message.content
-                
-            logger.info(f"成功生成摘要: {summary[:100]}...")
-            return summary
+            prompt = self._build_summarization_prompt(paper)
+            
+            response = self.client.chat.completions.create(
+                model=self.model,
+                temperature=self.temperature,
+                messages=[
+                    {"role": "system", "content": self.system_message},
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            
+            summary = response.choices[0].message.content
+            logger.info(f"Successfully generated summary for: {paper.get('title', 'Unknown')}")
+            
+            # Parse the structured summary into sections
+            sections = self._parse_summary_sections(summary)
+            return sections
             
         except Exception as e:
-            logger.error(f"生成摘要时出错: {str(e)}")
-            return f"摘要生成失败: {str(e)}"
+            logger.error(f"Error generating summary: {str(e)}")
+            raise RuntimeError(f"Failed to generate summary: {str(e)}")
     
     def _build_summarization_prompt(self, paper: Dict[str, Any]) -> str:
-        """构建摘要提示词
+        """Build the summarization prompt for the paper.
         
         Args:
-            paper: 包含论文信息的字典
+            paper: Dictionary containing paper information
             
         Returns:
-            格式化的提示词
+            Formatted prompt string
         """
-        # 提取论文的关键部分用于摘要
-        title = paper["title"]
-        authors = paper["authors"]
-        abstract = paper["summary"]
+        title = paper.get("title", "")
+        authors = paper.get("authors", [])
+        abstract = paper.get("summary", "")
         
-        # 如果有全文，取前5000个字符和后2000个字符（通常包含介绍和结论）
+        # If full text exists, take first 5000 and last 2000 chars (intro and conclusion)
         text_content = paper.get("text_content", "")
         if len(text_content) > 7000:
             text_sample = text_content[:5000] + "\n...\n" + text_content[-2000:]
@@ -97,33 +110,70 @@ class SummarizerAgent:
             text_sample = text_content
         
         prompt = f"""
-        请分析以下AI论文，并提取出论文的主要贡献、创新方法和关键发现。
+        Please analyze the following AI research paper and extract its main contributions, 
+        innovative methods, and key findings.
         
-        标题: {title}
-        作者: {authors}
-        摘要: {abstract}
+        Title: {title}
+        Authors: {', '.join(authors) if isinstance(authors, list) else authors}
+        Abstract: {abstract}
         
-        论文内容:
+        Paper Content:
         {text_sample}
         
-        请按照以下结构提供一个简洁但全面的中文摘要:
+        Please provide a concise but comprehensive summary with the following structure:
         
-        1. 研究问题: [简要描述论文解决的主要问题]
-        2. 主要方法/技术: [概述论文提出的方法或技术]
-        3. 核心创新点: [列出论文的主要创新点和贡献]
-        4. 主要发现/结果: [总结论文的关键发现和实验结果]
-        5. 潜在影响: [分析这项工作对AI领域可能的影响]
+        1. Research Problem: [Describe the main problem addressed]
+        2. Methodology: [Outline the proposed methods or techniques]
+        3. Key Innovations: [List the main innovations and contributions]
+        4. Findings/Results: [Summarize key findings and experimental results]
+        5. Potential Impact: [Analyze potential impact on the AI field]
         
-        摘要应该强调论文的独特贡献，而不是一般性描述。请特别注意寻找论文中表示创新的关键句子，例如"本文的主要贡献..."、"我们提出了..."、"与现有方法相比..."等。
+        Focus on unique contributions rather than general descriptions. Pay special attention 
+        to key phrases indicating innovation like "our main contributions...", "we propose...", 
+        "compared to existing methods..."
         """
         return prompt
     
-    def demo_run(self, text: str) -> str:
-        """演示运行，使用示例文本生成摘要"""
-        mock_paper = {
-            "title": "示例AI论文标题",
-            "authors": "张三, 李四, 王五",
-            "summary": "这是一篇关于大型语言模型优化的论文摘要...",
-            "text_content": text
+    def _parse_summary_sections(self, summary: str) -> Dict[str, str]:
+        """Parse the generated summary into structured sections.
+        
+        Args:
+            summary: Raw summary text from the API
+            
+        Returns:
+            Dictionary containing structured summary sections
+        """
+        sections = {
+            "research_problem": "",
+            "methodology": "",
+            "innovations": "",
+            "findings": "",
+            "impact": ""
         }
-        return self.summarize_paper(mock_paper)
+        
+        current_section = None
+        lines = summary.split("\n")
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            if "Research Problem:" in line:
+                current_section = "research_problem"
+            elif "Methodology:" in line or "Main Methods:" in line:
+                current_section = "methodology"
+            elif "Key Innovations:" in line or "Core Innovations:" in line:
+                current_section = "innovations"
+            elif "Findings" in line or "Results:" in line:
+                current_section = "findings"
+            elif "Impact:" in line or "Potential Impact:" in line:
+                current_section = "impact"
+            elif current_section:
+                sections[current_section] += line + " "
+        
+        # Clean up the sections
+        for key in sections:
+            sections[key] = sections[key].strip()
+        
+        return sections

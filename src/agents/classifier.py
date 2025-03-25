@@ -1,184 +1,186 @@
 # agents/classifier.py
+"""Agent for classifying research papers into predefined research areas."""
+
 import logging
-import autogen
-from typing import Dict, Any, List
-import openai
+import json
+import re
+from typing import Dict, Any, List, Optional
+from openai import OpenAI
+from src.utils.sample_data import get_sample_papers
 
 logger = logging.getLogger(__name__)
 
 class ClassifierAgent:
-    """负责将论文分类到用户定义的研究领域的Agent"""
+    """Agent responsible for classifying papers into predefined research areas.
     
-    def __init__(self, config: Dict[str, Any]):
-        self.config = config
-        self.llm_config = config["llm_config"]
-        self.interested_fields = config["interested_fields"]
-        
-        # 创建AutoGen智能体配置
-        self.agent_config = {
-            "name": "ClassifierAgent",
-            "llm_config": self.llm_config,
-            "system_message": f"""
-            你是一位专业的AI论文分类专家，擅长将论文归类到特定的研究领域。
-            你需要将论文分类到以下五个领域之一：
-            {', '.join(self.interested_fields)}
-            
-            如果论文跨越多个领域，请选择最主要的一个。
-            如果论文不属于以上任何一个领域，请标记为"其他"。
-            
-            为每篇论文提供分类结果时，请解释你的分类理由。
-            """
-        }
-        
-        # 创建AutoGen智能体实例
-        self.agent = autogen.AssistantAgent(**self.agent_config)
-        self.user_proxy = autogen.UserProxyAgent(
-            name="ClassifierProxy",
-            human_input_mode="NEVER",
-            system_message="你代表分类智能体与其他智能体通信。"
-        )
-        
-        # 初始化OpenAI客户端（直接API调用备选方案）
-        self.client = openai.OpenAI(api_key=config["openai_api_key"])
+    This agent uses OpenAI's API to analyze papers and classify them into one of several
+    predefined research areas, providing confidence scores and rationale for each classification.
+    """
     
-    def classify_paper(self, paper: Dict[str, Any], summary: str) -> Dict[str, Any]:
-        """将论文分类到感兴趣的研究领域
+    def __init__(self, config: Dict[str, Any], use_sample_data: bool = False):
+        """Initialize the ClassifierAgent.
         
         Args:
-            paper: 包含论文信息的字典
-            summary: 论文的主要贡献摘要（由摘要Agent生成）
+            config: Configuration dictionary containing OpenAI API settings and interested fields
+            use_sample_data: If True, use sample data instead of making API calls
+        """
+        self.config = config
+        self.use_sample_data = use_sample_data
+        self.interested_fields = config.get("interested_fields", [
+            "Large Language Models",
+            "Computer Vision",
+            "Reinforcement Learning",
+            "Neural Architecture",
+            "AI Safety"
+        ])
+        
+        # Initialize OpenAI client
+        if not use_sample_data:
+            self.client = OpenAI(api_key=config.get("openai_api_key"))
+            self.model = config.get("model", "gpt-4-turbo-preview")
+            self.temperature = config.get("temperature", 0.7)
+        
+        self.system_message = f"""
+        You are an expert AI paper classification specialist, skilled at categorizing papers 
+        into specific research areas.
+        
+        You need to classify papers into one of the following areas:
+        {', '.join(self.interested_fields)}
+        
+        If a paper spans multiple areas, choose the most prominent one.
+        If a paper doesn't fit any of these areas, classify it as "Other".
+        
+        Provide a detailed rationale for each classification decision.
+        """
+    
+    def classify_paper(self, paper: Dict[str, Any], summary: str) -> Dict[str, Any]:
+        """Classify a paper into one of the interested research areas.
+        
+        Args:
+            paper: Dictionary containing paper information
+            summary: Paper's main contributions summary
             
         Returns:
-            包含分类结果和理由的字典
+            Dictionary containing classification results and rationale
+            
+        Raises:
+            RuntimeError: If classification fails
         """
-        logger.info(f"正在对论文进行分类: {paper['title']}")
-        
-        # 构建提示词
-        prompt = self._build_classification_prompt(paper, summary)
+        if self.use_sample_data:
+            logger.info(f"Using sample data for paper: {paper.get('title', 'Unknown')}")
+            return {
+                "category": "Large Language Models",
+                "confidence": 0.9,
+                "rationale": "Sample classification rationale"
+            }
+            
+        logger.info(f"Classifying paper: {paper.get('title', 'Unknown')}")
         
         try:
-            # 直接调用OpenAI API
+            prompt = self._build_classification_prompt(paper, summary)
+            
             response = self.client.chat.completions.create(
-                model=self.llm_config["model"],
-                temperature=self.llm_config["temperature"],
+                model=self.model,
+                temperature=self.temperature,
                 messages=[
-                    {"role": "system", "content": self.agent_config["system_message"]},
+                    {"role": "system", "content": self.system_message},
                     {"role": "user", "content": prompt}
                 ]
             )
-            result = response.choices[0].message.content
             
-            # 解析分类结果
+            result = response.choices[0].message.content
             classification = self._parse_classification_result(result)
-            logger.info(f"分类结果: {classification['category']}")
+            
+            logger.info(f"Successfully classified paper as: {classification['category']}")
             return classification
             
         except Exception as e:
-            logger.error(f"论文分类时出错: {str(e)}")
-            return {
-                "category": "未分类",
-                "confidence": 0.0,
-                "rationale": f"分类失败: {str(e)}"
-            }
+            logger.error(f"Error classifying paper: {str(e)}")
+            raise RuntimeError(f"Failed to classify paper: {str(e)}")
     
     def _build_classification_prompt(self, paper: Dict[str, Any], summary: str) -> str:
-        """构建分类提示词
+        """Build the classification prompt for the paper.
         
         Args:
-            paper: 包含论文信息的字典
-            summary: 论文的主要贡献摘要
+            paper: Dictionary containing paper information
+            summary: Paper's main contributions summary
             
         Returns:
-            格式化的提示词
+            Formatted prompt string
         """
-        title = paper["title"]
-        abstract = paper["summary"]
+        title = paper.get("title", "")
+        abstract = paper.get("summary", "")
         
         prompt = f"""
-        请将以下AI论文分类到我们感兴趣的五个研究领域之一。
+        Please classify the following AI research paper into one of our areas of interest.
         
-        可选的研究领域:
+        Available Research Areas:
         {', '.join([f"{i+1}. {field}" for i, field in enumerate(self.interested_fields)])}
         
-        如果论文不属于以上任何领域，请分类为"其他"。
+        If the paper doesn't fit any of these areas, classify it as "Other".
         
-        论文信息:
-        标题: {title}
-        摘要: {abstract}
+        Paper Information:
+        Title: {title}
+        Abstract: {abstract}
         
-        论文主要贡献:
+        Main Contributions:
         {summary}
         
-        请按照以下JSON格式提供分类结果:
+        Provide your classification in the following JSON format:
         ```json
         {{
-            "category": "选择的领域名称",
-            "confidence": 0.85, // 分类的置信度，0-1之间的小数
-            "rationale": "分类理由的详细解释..."
+            "category": "chosen_area_name",
+            "confidence": 0.85,  # Classification confidence, float between 0-1
+            "rationale": "Detailed explanation of classification reasoning..."
         }}
         ```
         
-        只需返回JSON格式的结果，不需要其他说明。
+        Return only the JSON result without additional explanation.
         """
         return prompt
     
     def _parse_classification_result(self, result: str) -> Dict[str, Any]:
-        """解析分类结果
+        """Parse the classification result from the API response.
         
         Args:
-            result: LLM返回的分类结果文本
+            result: LLM response text
             
         Returns:
-            解析后的分类结果字典
+            Parsed classification result dictionary
+            
+        Raises:
+            ValueError: If unable to parse the classification result
         """
-        import json
-        import re
-        
-        # 尝试从文本中提取JSON部分
         try:
-            # 查找```json和```之间的内容
+            # Try to extract JSON content from code block
             json_match = re.search(r'```(?:json)?(.*?)```', result, re.DOTALL)
             if json_match:
                 json_str = json_match.group(1).strip()
             else:
-                # 如果没有代码块，则尝试匹配整个字符串作为JSON
+                # If no code block, try to parse the entire string as JSON
                 json_str = result.strip()
             
-            # 解析JSON
             classification = json.loads(json_str)
             
-            # 确保有所有必要的字段
-            if "category" not in classification:
-                classification["category"] = "未分类"
-            if "confidence" not in classification:
-                classification["confidence"] = 0.0
-            if "rationale" not in classification:
-                classification["rationale"] = "无分类理由"
-                
+            # Validate required fields
+            if not all(key in classification for key in ["category", "confidence", "rationale"]):
+                raise ValueError("Missing required fields in classification result")
+            
+            # Validate confidence score
+            confidence = float(classification["confidence"])
+            if not 0 <= confidence <= 1:
+                raise ValueError(f"Invalid confidence value: {confidence}")
+            
+            # Validate category
+            category = classification["category"]
+            if category not in self.interested_fields and category != "Other":
+                logger.warning(f"Unexpected category: {category}")
+            
             return classification
             
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse JSON result: {str(e)}")
+            raise ValueError(f"Invalid JSON format in classification result: {str(e)}")
         except Exception as e:
-            logger.error(f"解析分类结果时出错: {str(e)}")
-            # 尝试简单提取类别名
-            for field in self.interested_fields:
-                if field in result:
-                    return {
-                        "category": field,
-                        "confidence": 0.5,
-                        "rationale": f"解析错误，但发现匹配类别: {field}"
-                    }
-            
-            # 失败情况下返回默认值
-            return {
-                "category": "其他",
-                "confidence": 0.0,
-                "rationale": f"无法解析分类结果: {result[:100]}..."
-            }
-    
-    def demo_run(self, title: str, abstract: str, summary: str) -> Dict[str, Any]:
-        """演示运行，对示例论文进行分类"""
-        mock_paper = {
-            "title": title,
-            "summary": abstract
-        }
-        return self.classify_paper(mock_paper, summary)
+            logger.error(f"Error parsing classification result: {str(e)}")
+            raise ValueError(f"Failed to parse classification result: {str(e)}")
