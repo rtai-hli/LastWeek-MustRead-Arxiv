@@ -8,22 +8,26 @@ from typing import List, Dict, Optional
 import arxiv
 from time import sleep
 
+from src.utils.sample_data import get_sample_papers
+
 logger = logging.getLogger(__name__)
 
 class ArxivFetcher:
     """Fetches papers from ArXiv using the official API."""
     
-    def __init__(self, max_results: int = 100, delay_seconds: float = 3.0):
+    def __init__(self, max_results: int = 100, delay_seconds: float = 3.0, use_sample_data: bool = False):
         """
         Initialize the ArXiv fetcher.
         
         Args:
             max_results: Maximum number of results to return per query
             delay_seconds: Delay between API calls to respect rate limits
+            use_sample_data: Whether to use sample data instead of real API calls
         """
         self.client = arxiv.Client()
         self.max_results = max_results
         self.delay_seconds = delay_seconds
+        self.use_sample_data = use_sample_data
         
     def _format_paper(self, paper: arxiv.Result) -> Dict:
         """Convert arxiv.Result to our standard paper format."""
@@ -56,6 +60,10 @@ class ArxivFetcher:
         Returns:
             List of papers in standardized format
         """
+        if self.use_sample_data:
+            logger.info("Using sample paper data")
+            return get_sample_papers()
+            
         max_results = max_papers if max_papers else self.max_results
         
         # Calculate date range
@@ -83,11 +91,18 @@ class ArxivFetcher:
                 sleep(self.delay_seconds)  # Rate limiting
                 
             logger.info(f"Successfully fetched {len(results)} papers")
+            
+            # If no papers found, use sample data
+            if not results:
+                logger.warning("No papers found, using sample data")
+                return get_sample_papers()
+                
             return results
             
         except Exception as e:
             logger.error(f"Error fetching papers from arXiv: {str(e)}")
-            raise
+            logger.warning("Using sample data due to error")
+            return get_sample_papers()
             
     def get_paper_by_id(self, paper_id: str) -> Optional[Dict]:
         """
@@ -99,6 +114,13 @@ class ArxivFetcher:
         Returns:
             Paper data in standardized format or None if not found
         """
+        if self.use_sample_data:
+            # Try to find the paper in sample data
+            for paper in get_sample_papers():
+                if paper["id"] == paper_id or paper["id"] == paper_id.replace("arXiv:", ""):
+                    return paper
+            return None
+            
         try:
             # Remove 'arXiv:' prefix if present
             paper_id = paper_id.replace("arXiv:", "")
